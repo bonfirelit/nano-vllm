@@ -33,7 +33,7 @@ class LinearBase(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-
+# ReplicatedLinear表示虽然是分布式的环境，但每个GPU都持有一样的权重，并未分割
 class ReplicatedLinear(LinearBase):
 
     def __init__(
@@ -147,7 +147,9 @@ class RowParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 每个GPU上都会执行y = F.linear()，但每个GPU上的y都是最终结果的一部分
         y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
         if self.tp_size > 1:
+            # 这里进行all_reduce操作，使得每个GPU都得到最终结果
             dist.all_reduce(y)
         return y

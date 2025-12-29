@@ -8,6 +8,7 @@ from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.models.qwen2 import Qwen2ForCausalLM
+from nanovllm.models.qwen2_moe import Qwen2MoeForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
@@ -17,7 +18,8 @@ class ModelRunner:
 
     model_dict = {
         "qwen3": Qwen3ForCausalLM,
-        "qwen2": Qwen2ForCausalLM
+        "qwen2": Qwen2ForCausalLM,
+        "qwen2_moe": Qwen2MoeForCausalLM,
     }
 
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
@@ -83,6 +85,7 @@ class ModelRunner:
 
     def write_shm(self, method_name, *args):
         assert self.world_size > 1 and self.rank == 0
+        # 这里并未对args做改动，意味着所有进程的参数是一样的
         data = pickle.dumps([method_name, *args])
         n = len(data)
         self.shm.buf[0:4] = n.to_bytes(4, "little")
