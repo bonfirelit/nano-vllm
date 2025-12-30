@@ -9,6 +9,7 @@ from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.models.qwen2 import Qwen2ForCausalLM
 from nanovllm.models.qwen2_moe import Qwen2MoeForCausalLM
+from nanovllm.models.qwen3_moe import Qwen3MoeForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
@@ -20,6 +21,7 @@ class ModelRunner:
         "qwen3": Qwen3ForCausalLM,
         "qwen2": Qwen2ForCausalLM,
         "qwen2_moe": Qwen2MoeForCausalLM,
+        "qwen3_moe": Qwen3MoeForCausalLM,
     }
 
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
