@@ -7,7 +7,7 @@ from transformers import Qwen3MoeConfig
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
 from nanovllm.layers.layernorm import RMSNorm
-from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear, ReplicatedLinear
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 
@@ -127,6 +127,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self,
         config: Qwen3MoeConfig,
     ) -> None:
+        super().__init__()
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.moe_intermediate_size
         self.hidden_act = config.hidden_act
@@ -134,7 +135,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.num_experts_per_tok = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
 
-        self.gate = nn.Linear(self.hidden_size, self.num_experts, bias=False)
+        self.gate = ReplicatedLinear(self.hidden_size, self.num_experts, bias=False)
         # 这里每个专家是一个MoeMLP，按照上面的实现，这里是将每个专家的权重分布到多个GPU上，每个GPU持有所有专家的部分权重
         # 这是Sharded Experts的方法
         # 还有一种Split Experts的方法，将专家分布到多个GPU上，每个GPU持有部分专家，在GPU上的专家的权重是完整的
@@ -146,8 +147,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        b, s, h = hidden_states.shape
-        # Moe是token-wise的，因此可以将batch之间的token混合
+        original_shape = hidden_states.shape
+        h = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, h)
         router_logit = self.gate(hidden_states)
         # routing_weights.shape = (b * s, num_experts)
@@ -180,7 +181,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
 
         # Reshape 回原始形状
-        return final_hidden_states.view(b, s, h)
+        return final_hidden_states.view(original_shape)
 
 class Qwen3MoeDecoderLayer(nn.Module):
     def __init__(
@@ -189,16 +190,16 @@ class Qwen3MoeDecoderLayer(nn.Module):
         layer_idx: int
     ) -> None:
         super().__init__()
-        self.attention = Qwen3MoeAttention(
+        self.self_attn = Qwen3MoeAttention(
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             max_position=config.max_position_embeddings,
-            head_dim=None,
+            head_dim=getattr(config, 'head_dim', None),
             rms_norm_eps=config.rms_norm_eps,
-            qkv_bias=config.qkv_bias,
-            rope_theta=config.rope_theta,
-            rope_scaling=config.rope_scaling
+            qkv_bias=getattr(config, 'attention_bias', True),
+            rope_theta=getattr(config, "rope_theta", 1000000),
+            rope_scaling=getattr(config, "rope_scaling", None),
         )
 
         if (layer_idx not in config.mlp_only_layers) and (
@@ -224,7 +225,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states), hidden_states
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.attention(hidden_states, position)
+        hidden_states = self.self_attn(hidden_states, position)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
