@@ -21,7 +21,7 @@ class FusedMoeLinearBase(nn.Module):
         tp_dim: int | None = None,
     ) -> None:
         super().__init__()
-        self.tp_dim = tp_dim
+        self.tp_dim = tp_dim # 在哪个维度进行张量并行
         self.tp_rank = dist.get_rank()
         self.tp_size = dist.get_world_size()
 
@@ -122,5 +122,8 @@ class MergedColumnParallelFusedMoeLinear(ColumnParallelFusedMoeLinear):
         shard_offset = sum(self.out_feature_list[:shard_id]) // self.tp_size
         shard_size = self.out_feature_list[shard_id] // self.tp_size
         param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
-        local_weight = loaded_weight.chunk(self.tp_size, dim=self.tp_dim)[self.tp_rank]
+        # loaded_weight: [out_feature, in_feature], 而param_data: [num_experts, shard_size, in_feature]
+        # 需要把loaded_weight按列切分，也就是dim=0，也就是tp_dim-1
+        assert self.tp_dim == 1, "MergedColumnParallelFusedMoeLinear only supports tp_dim=1"
+        local_weight = loaded_weight.chunk(self.tp_size, dim=self.tp_dim-1)[self.tp_rank]
         param_data[expert_idx] = local_weight
