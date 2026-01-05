@@ -375,6 +375,8 @@ class Qwen3MoeForCausalLM(nn.Module):
                     is_expert = "mlp.experts" in weight_name
                     is_loaded = False
 
+                    # 这里为什么要对专家参数的名字进行处理？
+                    # 因为fuse_moe_linear的weight_loader需要知道expert_idx来加载对应专家的权重
                     # Process experts params name
                     if is_expert:
                         mlp_module_name, expert_module_name = weight_name.split(".experts.")
