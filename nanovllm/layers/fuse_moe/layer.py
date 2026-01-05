@@ -119,7 +119,10 @@ class MergedColumnParallelFusedMoeLinear(ColumnParallelFusedMoeLinear):
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, expert_idx: int, shard_id: int):
         param_data = param.data
-        shard_offset = sum(self.out_feature_list[:shard_id]) // self.tp_size
+        # shard_offset = sum(self.out_feature_list[:shard_id]) // self.tp_size
+        shard_offset = 0
+        for i in range(shard_id):
+            shard_offset += self.out_feature_list[i] // self.tp_size
         shard_size = self.out_feature_list[shard_id] // self.tp_size
         param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
         # loaded_weight: [out_feature, in_feature], 而param_data: [num_experts, shard_size, in_feature]
