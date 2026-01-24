@@ -121,7 +121,10 @@ class ModelRunner:
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
+        # block_bytes的意思是，给**每层**都分配**一个**block，我需要block_bytes的显存
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
+        # 这里计算的num_kvcache_blocks，以总的可用内存除以block_bytes，代表的就是**每层**能分配的block的数量
+        # 因此后面的self.kv_cache的shape中，第二个维度是hf_config.num_hidden_layers
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
@@ -157,7 +160,7 @@ class ModelRunner:
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
-            if not seq.block_table:    # warmup
+            if not seq.block_table:    # warmup阶段进入continue
                 continue
             for i in range(seq.num_cached_blocks, seq.num_blocks):
                 start = seq.block_table[i] * self.block_size
@@ -167,6 +170,15 @@ class ModelRunner:
                     end = start + seq.last_block_num_tokens 
                 slot_mapping.extend(list(range(start, end)))
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
+            '''
+            cu_seqlens_q: 当前 Batch 中所有请求新生成的（需要计算的） Token 总长度。
+            cu_seqlens_k: 当前 Batch 中所有请求历史总和（包括过去已缓存的） Token 总长度.
+            如果不使用前缀缓存，这两个值通常是相等的，因为你要从头开始计算所有的 Token。
+            但当启用 Prefix Caching （比如 System Prompt 是共享的，且已经算好存在显存里了）时：
+            seqlen_q = 当前用户输入的 Token 长度（需要算）。
+            seqlen_k = 之前的公共前缀长度 + 当前用户输入的 Token 长度（ KV Cache 中实际持有的长度）。
+            因此，如果 cu_seqlens_k > cu_seqlens_q ，说明这个 Batch 中至少有一个请求命中了前缀缓存。
+            '''
             block_tables = self.prepare_block_tables(seqs)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)

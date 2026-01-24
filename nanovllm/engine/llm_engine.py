@@ -47,7 +47,12 @@ class LLMEngine:
 
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
+        # 这里有可优化的点：call可能会执行较久的时间，此时可以让scheduler进行下一次（N+1）的调度
+        # 同理，下面的postprocess也可在call执行第N个batch时进行第N-1个batch的后处理
+        # 即mini-sglang中的overlap schedule
         token_ids = self.model_runner.call("run", seqs, is_prefill)
+        # postprocess负责检查请求是否结束
+        # 如果适配chunked prefill，这里可以要求上一步返回的对应req的token_ids是空
         self.scheduler.postprocess(seqs, token_ids)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)

@@ -18,7 +18,7 @@ def store_kvcache_kernel(
     slot_mapping_ptr,
     D: tl.constexpr,
 ):
-    idx = tl.program_id(0)
+    idx = tl.program_id(0) # 第idx个token
     slot = tl.load(slot_mapping_ptr + idx)
     if slot == -1: return
     key_offsets = idx * key_stride + tl.arange(0, D)
@@ -33,6 +33,7 @@ def store_kvcache_kernel(
 def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor):
     N, num_heads, head_dim = key.shape
     D = num_heads * head_dim
+    # stride(i)理解为：在第i维度上，跨过一个元素需要跳过多少个元素
     assert key.stride(-1) == 1 and value.stride(-1) == 1
     assert key.stride(1) == head_dim and value.stride(1) == head_dim
     assert k_cache.stride(1) == D and v_cache.stride(1) == D
@@ -54,7 +55,7 @@ class Attention(nn.Module):
         self.head_dim = head_dim
         self.scale = scale
         self.num_kv_heads = num_kv_heads
-        self.k_cache = self.v_cache = torch.tensor([])
+        self.k_cache = self.v_cache = torch.tensor([]) # shape:(config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
