@@ -1,6 +1,8 @@
 import os
 from glob import glob
 import torch
+import triton
+import triton.language as tl
 from torch import nn
 from safetensors import safe_open
 from nanovllm.config import QuantConfig
@@ -38,10 +40,11 @@ def load_model(
                         weight_loader = getattr(param, "weight_loader")
                         if quant_config is not None:
                             prefix = weight_name.split('.')[:-1]
-                            qweight = f.get_tensor('.'.join(prefix + ["qweight"]))
-                            qzeros = f.get_tensor('.'.join(prefix + ["qzeros"]))
-                            scales = f.get_tensor('.'.join(prefix + ["scales"]))
-                            weight = _dequantize(qweight, qzeros, scales, quant_config)
+                            qweight = f.get_tensor('.'.join(prefix + ["qweight"])).cuda()
+                            qzeros = f.get_tensor('.'.join(prefix + ["qzeros"])).cuda()
+                            scales = f.get_tensor('.'.join(prefix + ["scales"])).cuda()
+                            # weight = _dequantize(qweight, qzeros, scales, quant_config)
+                            weight = triton_dequantize(qweight, scales, qzeros, quant_config)
                         else:
                             weight = f.get_tensor(weight_name)
                         weight_loader(param, weight, shard_id)
@@ -53,10 +56,11 @@ def load_model(
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     if quant_config is not None and "proj" in weight_name:
                         prefix = weight_name.split('.')[:-1]
-                        qweight = f.get_tensor('.'.join(prefix + ["qweight"]))
-                        qzeros = f.get_tensor('.'.join(prefix + ["qzeros"]))
-                        scales = f.get_tensor('.'.join(prefix + ["scales"]))
-                        weight = _dequantize(qweight, qzeros, scales, quant_config)
+                        qweight = f.get_tensor('.'.join(prefix + ["qweight"])).cuda()
+                        qzeros = f.get_tensor('.'.join(prefix + ["qzeros"])).cuda()
+                        scales = f.get_tensor('.'.join(prefix + ["scales"])).cuda()
+                        weight = triton_dequantize(qweight, scales, qzeros, quant_config)
+                        # weight = _dequantize(qweight, qzeros, scales, quant_config)
                     else:
                         weight = f.get_tensor(weight_name)
                     weight_loader(param, weight)
@@ -102,3 +106,99 @@ def _dequantize(
     weights = (iweights.to(scales.dtype) - izeros_expanded.to(scales.dtype)) * scales_expanded
     
     return weights.t()
+@triton.jit
+def awq_dequantize_kernel(
+    qweight_ptr,      # 指针: [K, N/8]
+    scales_ptr,       # 指针: [K/G, N]
+    zeros_ptr,        # 指针: [K/G, N/8]
+    result_ptr,       # 指针: [K, N] (输出)
+    K, N, G,          # 维度
+    stride_qk, stride_qn,  # qweight 的步长
+    stride_sk, stride_sn,  # scales 的步长
+    stride_zk, stride_zn,  # zeros 的步长
+    stride_rk, stride_rn,  # result 的步长
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    # 1. 索引计算
+    pid_k = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    
+    offs_k = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+    offs_n_logical = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    
+    # 针对打包数据的 N 索引 (每 8 个逻辑列对应一个打包列)
+    # 这里的关键是：每一个线程块处理的打包列范围
+    offs_n_packed = (pid_n * BLOCK_SIZE_N // 8) + tl.arange(0, BLOCK_SIZE_N // 8)
+
+    # 2. 构造 AWQ 位移 (0, 16, 4, 20, 8, 24, 12, 28)
+    # 对应顺序 [0, 4, 1, 5, 2, 6, 3, 7]
+    idx = tl.arange(0, 8)
+    shifts = ((idx % 2) * 4 + (idx // 2)) * 4
+
+    # 3. 加载 qweight [BLOCK_SIZE_K, BLOCK_SIZE_N / 8]
+    q_ptrs = qweight_ptr + (offs_k[:, None] * stride_qk + offs_n_packed[None, :] * stride_qn)
+    q_mask = (offs_k[:, None] < K) & (offs_n_packed[None, :] < (N // 8))
+    q_packed = tl.load(q_ptrs, mask=q_mask, other=0)
+
+    # 4. 解包逻辑：利用广播和 reshape
+    # 将 q_packed 展开一个新维度：[K, N/8] -> [K, N/8, 1]
+    q_res = tl.reshape(q_packed, (BLOCK_SIZE_K, BLOCK_SIZE_N // 8, 1))
+    # 广播 shifts: [1, 1, 8]
+    shifts_br = tl.reshape(shifts, (1, 1, 8))
+    
+    # 利用广播机制直接计算
+    weights = (q_res >> shifts_br) & 0xF
+    # 展平回 [K, N]
+    weights = tl.reshape(weights, (BLOCK_SIZE_K, BLOCK_SIZE_N))
+
+    # 5. 加载 Zeros (同理)
+    group_idx = offs_k // G
+    z_ptrs = zeros_ptr + (group_idx[:, None] * stride_zk + offs_n_packed[None, :] * stride_zn)
+    z_mask = (group_idx[:, None] < (K // G)) & (offs_n_packed[None, :] < (N // 8))
+    z_packed = tl.load(z_ptrs, mask=z_mask, other=0)
+    
+    z_res = tl.reshape(z_packed, (BLOCK_SIZE_K, BLOCK_SIZE_N // 8, 1))
+    zeros = (z_res >> shifts_br) & 0xF
+    zeros = tl.reshape(zeros, (BLOCK_SIZE_K, BLOCK_SIZE_N))
+    
+    # 6. 加载 Scales (Scales 是正常的 FP16，无需位移)
+    s_ptrs = scales_ptr + (group_idx[:, None] * stride_sk + offs_n_logical[None, :] * stride_sn)
+    s_mask = (group_idx[:, None] < (K // G)) & (offs_n_logical[None, :] < N)
+    scales = tl.load(s_ptrs, mask=s_mask, other=0.0)
+    
+    # 7. 反量化计算
+    # Weight = (Q - Z) * S
+    dequant_weights = (weights.to(tl.float16) - zeros.to(tl.float16)) * scales
+    
+    # 8. 写回结果
+    r_ptrs = result_ptr + (offs_k[:, None] * stride_rk + offs_n_logical[None, :] * stride_rn)
+    r_mask = (offs_k[:, None] < K) & (offs_n_logical[None, :] < N)
+    tl.store(r_ptrs, dequant_weights, mask=r_mask)
+
+def triton_dequantize(qweight, scales, qzeros, config):
+    K, N_packed = qweight.shape
+    N = N_packed * 8
+    G = config.group_size
+    
+    result = torch.empty((K, N), dtype=scales.dtype, device=qweight.device)
+    
+    # 定义 Grid：按输出矩阵的 K 和 N 划分
+    # BLOCK_SIZE_N 必须是 8 的倍数（因为 1 个 int32 包含 8 个权重）
+    grid = lambda META: (
+        triton.cdiv(K, META['BLOCK_SIZE_K']),
+        triton.cdiv(N, META['BLOCK_SIZE_N']),
+    )
+    
+    awq_dequantize_kernel[grid](
+        qweight, scales, qzeros, result,
+        K, N, G,
+        qweight.stride(0), qweight.stride(1),
+        scales.stride(0), scales.stride(1),
+        qzeros.stride(0), qzeros.stride(1),
+        result.stride(0), result.stride(1),
+        BLOCK_SIZE_K=32, 
+        BLOCK_SIZE_N=128, # 一个块处理 128 列（对应 16 个 int32）
+    )
+    
+    return result.t()
