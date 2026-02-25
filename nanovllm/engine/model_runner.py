@@ -40,7 +40,10 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
-        self.model = ModelRunner.model_dict[self.model_type](hf_config)
+        if self.model_type == "qwen3": # 暂时只修改了qwen3的model的量化加载逻辑
+            self.model = Qwen3ForCausalLM(hf_config, quant_config=config.quantization_config)
+        else :
+            self.model = ModelRunner.model_dict[self.model_type](hf_config)
         print("[LOG] Loading model weights...")
         load_model(self.model, config.model)
         print("[LOG] Model weights loaded.")

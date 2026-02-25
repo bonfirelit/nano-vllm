@@ -11,12 +11,7 @@ from nanovllm.config import QuantConfig
 def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
     param.data.copy_(loaded_weight)
 
-
-def load_model(
-    model: nn.Module, 
-    path: str, 
-    quant_config: QuantConfig | None = None
-) -> None:
+def load_model(model: nn.Module, path: str):
     # Check if the model has its own load_model method
     if hasattr(model, "load_model"):
         model.load_model(path)
@@ -25,45 +20,68 @@ def load_model(
     for file in glob(os.path.join(path, "*.safetensors")):
         with safe_open(file, "pt", "cpu") as f:
             for weight_name in f.keys():
-                if 'qzeros' in weight_name or 'scales' in weight_name:
-                    continue
                 for k in packed_modules_mapping:
                     if k in weight_name:
                         v, shard_id = packed_modules_mapping[k]
                         param_name = weight_name.replace(k, v)
-                        if 'qweight' in weight_name:
-                            weight_name = weight_name.replace('qweight', 'weight')
-                        # 例如，weight_name 是 "layers.0.self_attn.q_proj.weight"
-                        # packed_modules_mapping 中 "q_proj" 映射到 ("qkv_proj", "q")
-                        # 那么 param_name 就是 "layers.0.self_attn.qkv_proj.weight"
                         param = model.get_parameter(param_name)
                         weight_loader = getattr(param, "weight_loader")
-                        if quant_config is not None:
-                            prefix = weight_name.split('.')[:-1]
-                            qweight = f.get_tensor('.'.join(prefix + ["qweight"])).cuda()
-                            qzeros = f.get_tensor('.'.join(prefix + ["qzeros"])).cuda()
-                            scales = f.get_tensor('.'.join(prefix + ["scales"])).cuda()
-                            # weight = _dequantize(qweight, qzeros, scales, quant_config)
-                            weight = triton_dequantize(qweight, scales, qzeros, quant_config)
-                        else:
-                            weight = f.get_tensor(weight_name)
-                        weight_loader(param, weight, shard_id)
+                        weight_loader(param, f.get_tensor(weight_name), shard_id)
                         break
                 else:
-                    if 'qweight' in weight_name:
-                        weight_name = weight_name.replace('qweight', 'weight')
                     param = model.get_parameter(weight_name)
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    if quant_config is not None and "proj" in weight_name:
-                        prefix = weight_name.split('.')[:-1]
-                        qweight = f.get_tensor('.'.join(prefix + ["qweight"])).cuda()
-                        qzeros = f.get_tensor('.'.join(prefix + ["qzeros"])).cuda()
-                        scales = f.get_tensor('.'.join(prefix + ["scales"])).cuda()
-                        weight = triton_dequantize(qweight, scales, qzeros, quant_config)
-                        # weight = _dequantize(qweight, qzeros, scales, quant_config)
-                    else:
-                        weight = f.get_tensor(weight_name)
-                    weight_loader(param, weight)
+                    weight_loader(param, f.get_tensor(weight_name))
+
+# def load_model(
+#     model: nn.Module, 
+#     path: str, 
+#     quant_config: QuantConfig | None = None
+# ) -> None:
+#     # Check if the model has its own load_model method
+#     if hasattr(model, "load_model"):
+#         model.load_model(path)
+#         return
+#     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
+#     for file in glob(os.path.join(path, "*.safetensors")):
+#         with safe_open(file, "pt", "cpu") as f:
+#             for weight_name in f.keys():
+#                 if 'qzeros' in weight_name or 'scales' in weight_name:
+#                     continue
+#                 for k in packed_modules_mapping:
+#                     if k in weight_name:
+#                         v, shard_id = packed_modules_mapping[k]
+#                         param_name = weight_name.replace(k, v)
+#                         if 'qweight' in param_name:
+#                             param_name = param_name.replace('qweight', 'weight')
+#                         param = model.get_parameter(param_name)
+#                         weight_loader = getattr(param, "weight_loader")
+#                         if quant_config is not None and "proj" in weight_name:
+#                             prefix = weight_name.split('.')[:-1]
+#                             qweight = f.get_tensor('.'.join(prefix + ["qweight"])).cuda()
+#                             qzeros = f.get_tensor('.'.join(prefix + ["qzeros"])).cuda()
+#                             scales = f.get_tensor('.'.join(prefix + ["scales"])).cuda()
+#                             weight = triton_dequantize(qweight, scales, qzeros, quant_config)
+#                             # weight = _dequantize(qweight, qzeros, scales, quant_config)
+#                         else:
+#                             weight = f.get_tensor(weight_name)
+#                         weight_loader(param, weight, shard_id)
+#                         break
+#                 else:
+#                     if 'qweight' in weight_name:
+#                         weight_name = weight_name.replace('qweight', 'weight')
+#                     param = model.get_parameter(weight_name)
+#                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
+#                     if quant_config is not None and "proj" in weight_name:
+#                         prefix = weight_name.split('.')[:-1]
+#                         qweight = f.get_tensor('.'.join(prefix + ["qweight"])).cuda()
+#                         qzeros = f.get_tensor('.'.join(prefix + ["qzeros"])).cuda()
+#                         scales = f.get_tensor('.'.join(prefix + ["scales"])).cuda()
+#                         weight = triton_dequantize(qweight, scales, qzeros, quant_config)
+#                         # weight = _dequantize(qweight, qzeros, scales, quant_config)
+#                     else:
+#                         weight = f.get_tensor(weight_name)
+#                     weight_loader(param, weight)
 
 
 def _dequantize(
@@ -106,6 +124,7 @@ def _dequantize(
     weights = (iweights.to(scales.dtype) - izeros_expanded.to(scales.dtype)) * scales_expanded
     
     return weights.t()
+
 @triton.jit
 def awq_dequantize_kernel(
     qweight_ptr,      # 指针: [K, N/8]

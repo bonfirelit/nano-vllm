@@ -29,31 +29,33 @@ class LinearBase(nn.Module):
             self.qweight = nn.Parameter(torch.empty(
                 input_size,
                 output_size // 8,
-                dtype=torch.int32)
+                dtype=torch.int32),
+                requires_grad=False,
             )
             self.qzeros = nn.Parameter(torch.empty(
                 input_size // self.group_size,
                 output_size // 8,
-                dtype=torch.int32)
+                dtype=torch.int32),
+                requires_grad=False,
             )
             self.scales = nn.Parameter(torch.empty(
                 input_size // self.group_size,
                 output_size,
-                dtype=torch.float16)
+                dtype=torch.float16),
+                requires_grad=False,
             )
-            self.qweight.name = "qweight"
-            self.qzeros.name = "qzeros"
-            self.scales.name = "scales"
             self.qweight.weight_loader = self.weight_loader
             self.qzeros.weight_loader = self.weight_loader
             self.scales.weight_loader = self.weight_loader
         else:
             self.weight = nn.Parameter(torch.empty(output_size, input_size))
-            self.weight.name = "weight"
+            # self.weight.name = "weight"
+            # setattr(self.weight, "name", "weight")
             self.weight.weight_loader = self.weight_loader
         if bias:
             self.bias = nn.Parameter(torch.empty(output_size))
-            self.bias.name = "bias"
+            # self.bias.name = "bias"
+            # setattr(self.bias, "name", "bias")
             self.bias.weight_loader = self.weight_loader
         else:
             self.register_parameter("bias", None)
@@ -109,11 +111,11 @@ class ColumnParallelLinear(LinearBase):
         # 1. 确定切分维度
         # 对于 AWQ，qweight 是 [in, out/8]，qzeros 是 [in/g, out/8]
         # 它们的 output 维度都在 dim 1
-        if "qweight" in param.name or "qzeros" in param.name:
+        if hasattr(self, "qweight") and param is self.qweight:
             curr_tp_dim = 1 
-        elif "scales" in param.name:
+        elif hasattr(self, "scales") and param is self.scales:
             curr_tp_dim = 1
-        elif "bias" in param.name:
+        elif hasattr(self, "bias") and param is self.bias:
             curr_tp_dim = 0
         else:
             # 普通 FP16 weight 是 [out, in]，所以切分 dim 0
@@ -150,7 +152,22 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: int):
         param_data = param.data
-        param_name = getattr(param, "name", None)
+        if hasattr(self, "qweight") and param is self.qweight:
+            param_name = "qweight"
+        elif hasattr(self, "qzeros") and param is self.qzeros:
+            param_name = "qzeros"
+        elif hasattr(self, "scales") and param is self.scales:
+            param_name = "scales"
+        elif hasattr(self, "bias") and param is self.bias:
+            param_name = "bias"
+        else:
+            param_name = "weight"
+        print(f"MergedColumn DEBUG: \
+    param={param_name}, \
+    shape={param.shape}, \
+    shard={loaded_shard_id}, \
+    loaded_shape={loaded_weight.shape}"
+              )
         # 1. 确定当前参数在 output 维度上的缩放系数
         # qweight/qzeros 是打包过的 (int32)，每个元素代表 8 个权重
         # scales/bias 是 1:1 的
@@ -158,7 +175,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         # 2. 确定切分维度 (对于 ColumnParallel，output 维即我们要切的维)
         # qweight/qzeros/scales: 维度 1
         # bias: 维度 0
-        if param_name == "bias":
+        if param_name in ["bias", "weight"]:
             tp_dim = 0
         else:
             tp_dim = 1
@@ -198,11 +215,26 @@ class QKVParallelLinear(ColumnParallelLinear):
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str):
         param_data = param.data
-        param_name = getattr(param, "name", None)
+        if hasattr(self, "qweight") and param is self.qweight:
+            param_name = "qweight"
+        elif hasattr(self, "qzeros") and param is self.qzeros:
+            param_name = "qzeros"
+        elif hasattr(self, "scales") and param is self.scales:
+            param_name = "scales"
+        elif hasattr(self, "bias") and param is self.bias:
+            param_name = "bias"
+        else:
+            param_name = "weight"
+        print(f"QKVParallel DEBUG: \
+    param={param_name}, \
+    shape={param.shape}, \
+    shard={loaded_shard_id}, \
+    loaded_shape={loaded_weight.shape}"
+              )
         # 1. 确定打包因子和切分维度
         pack_factor = 8 if (param_name == "qweight" or param_name == "qzeros") else 1
         # ColumnParallel 逻辑：除了 bias 在 dim 0，其余（qweight, qzeros, scales）都在 dim 1
-        tp_dim = 0 if param_name == "bias" else 1
+        tp_dim = 0 if param_name in ["bias", "weight"] else 1
         # 2. 计算每个部分在当前 rank 内存中的原始宽度 (未打包宽度)
         q_width = self.num_heads * self.head_size
         k_width = self.num_kv_heads * self.head_size
@@ -247,7 +279,21 @@ class RowParallelLinear(LinearBase):
         super().__init__(divide(input_size, tp_size), output_size, bias, 1, quant_config=quant_config)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
-        param_name = getattr(param, "name", None)
+        if hasattr(self, "qweight") and param is self.qweight:
+            param_name = "qweight"
+        elif hasattr(self, "qzeros") and param is self.qzeros:
+            param_name = "qzeros"
+        elif hasattr(self, "scales") and param is self.scales:
+            param_name = "scales"
+        elif hasattr(self, "bias") and param is self.bias:
+            param_name = "bias"
+        else:
+            param_name = "weight"
+        print(f"RowParallel DEBUG: \
+  param={param_name}, \
+  shape={param.shape}, \
+  loaded_shape={loaded_weight.shape}"
+              )
         tp_rank = self.tp_rank
         
         # 1. 确定切分维度
