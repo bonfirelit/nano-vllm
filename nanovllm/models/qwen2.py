@@ -118,6 +118,7 @@ class Qwen2DecoderLayer(nn.Module):
     def __init__(
         self,
         config: Qwen2Config,
+        quant_config=None,
     ) -> None:
         super().__init__()
         self.self_attn = Qwen2Attention(
@@ -155,7 +156,7 @@ class Qwen2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 class Qwen2Model(nn.Module):
-    def __init__(self, config: Qwen2Config):
+    def __init__(self, config: Qwen2Config, quant_config=None):
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([Qwen2DecoderLayer(config) for _ in range(config.num_hidden_layers)])
@@ -182,9 +183,9 @@ class Qwen2ForCausalLM(nn.Module):
         "up_proj": ("gate_up_proj", 1),
     }
     
-    def __init__(self, config: Qwen2Config):
+    def __init__(self, config: Qwen2Config, quant_config=None):
         super().__init__()
-        self.model = Qwen2Model(config)
+        self.model = Qwen2Model(config, quant_config=quant_config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         if config.tie_word_embeddings:
             self.lm_head.weight.data = self.model.embed_tokens.weight.data

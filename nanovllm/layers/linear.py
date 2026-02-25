@@ -162,12 +162,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             param_name = "bias"
         else:
             param_name = "weight"
-        print(f"MergedColumn DEBUG: \
-    param={param_name}, \
-    shape={param.shape}, \
-    shard={loaded_shard_id}, \
-    loaded_shape={loaded_weight.shape}"
-              )
+        print(f"MergedColumn DEBUG: param={param_name}, shape={param.shape}, "
+              f"shard={loaded_shard_id}, loaded_shape={loaded_weight.shape}")
         # 1. 确定当前参数在 output 维度上的缩放系数
         # qweight/qzeros 是打包过的 (int32)，每个元素代表 8 个权重
         # scales/bias 是 1:1 的
@@ -225,12 +221,8 @@ class QKVParallelLinear(ColumnParallelLinear):
             param_name = "bias"
         else:
             param_name = "weight"
-        print(f"QKVParallel DEBUG: \
-    param={param_name}, \
-    shape={param.shape}, \
-    shard={loaded_shard_id}, \
-    loaded_shape={loaded_weight.shape}"
-              )
+        print(f"QKVParallel DEBUG: param={param_name}, shape={param.shape}, "
+              f"shard={loaded_shard_id}, loaded_shape={loaded_weight.shape}")
         # 1. 确定打包因子和切分维度
         pack_factor = 8 if (param_name == "qweight" or param_name == "qzeros") else 1
         # ColumnParallel 逻辑：除了 bias 在 dim 0，其余（qweight, qzeros, scales）都在 dim 1
@@ -257,10 +249,12 @@ class QKVParallelLinear(ColumnParallelLinear):
         target_slice = param_data.narrow(tp_dim, shard_offset, shard_size)
 
         # 5. 处理从文件读入的加载权重 (Source)
-        # 磁盘上的 loaded_weight 形状通常是 [in, full_out_i/pack] 
+        # 磁盘上的 loaded_weight 形状通常是 [in, full_out_i/pack]
         # 我们需要按 TP 挖出当前 rank 负责的那一块
-        # 注意：磁盘上的数据也是打包过的，所以要按当前物理维度 chunk
-        loaded_weight_tp_shard = loaded_weight.chunk(self.tp_size, dim=tp_dim)[self.tp_rank]
+        # 注意：磁盘上的数据也是打包过的，所以要按当前物理维度计算精确分片
+        loaded_shard_size = loaded_weight.size(tp_dim) // self.tp_size
+        start_idx = self.tp_rank * loaded_shard_size
+        loaded_weight_tp_shard = loaded_weight.narrow(tp_dim, start_idx, loaded_shard_size)
 
         # 6. 执行拷贝
         target_slice.copy_(loaded_weight_tp_shard)
@@ -289,11 +283,8 @@ class RowParallelLinear(LinearBase):
             param_name = "bias"
         else:
             param_name = "weight"
-        print(f"RowParallel DEBUG: \
-  param={param_name}, \
-  shape={param.shape}, \
-  loaded_shape={loaded_weight.shape}"
-              )
+        print(f"RowParallel DEBUG: param={param_name}, shape={param.shape}, "
+              f"loaded_shape={loaded_weight.shape}")
         tp_rank = self.tp_rank
         
         # 1. 确定切分维度
@@ -322,17 +313,17 @@ class RowParallelLinear(LinearBase):
             # 每个 rank 计算局部乘积
             # x: [batch, input_size/tp_size], qweight: [input_size/tp_size, output_size/8]
             output = awq_matmul(x, self.qweight, self.qzeros, self.scales, self.group_size)
-            
-            # 只有 Rank 0 负责加 Bias（或者每个 Rank 算完 reduce 后加，取决于框架实现）
-            if self.bias is not None:
-                output += self.bias
         else:
             output = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
 
         # RowParallel 的灵魂：All-Reduce
         if self.tp_size > 1:
             dist.all_reduce(output)
-        
+
+        # 在 all-reduce 之后再加 bias (AWQ 情况下所有 rank 都有完整 bias)
+        if hasattr(self, "qweight") and self.qweight is not None and self.bias is not None:
+            output += self.bias
+
         return output
         # 每个GPU上都会执行y = F.linear()，但每个GPU上的y都是最终结果的一部分
         # y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)

@@ -57,10 +57,12 @@ def awq_matmul_kernel(
         # 加载 Scales & Zeros [K/G, N]
         group_idx = (k * BLOCK_SIZE_K) // G
         s_ptrs = scales_ptr + (group_idx * stride_sk + offs_bn[None, :] * stride_sn)
-        scales = tl.load(s_ptrs)
-        
+        s_mask = offs_bn[None, :] < N
+        scales = tl.load(s_ptrs, mask=s_mask, other=0.0)
+
         z_ptrs = zeros_ptr + (group_idx * stride_zk + offs_bn_packed[None, :] * stride_zn)
-        zeros_packed = tl.load(z_ptrs) # [1, BLOCK_SIZE_N/8]
+        z_mask = offs_bn_packed[None, :] < (N // 8)
+        zeros_packed = tl.load(z_ptrs, mask=z_mask, other=0) # [1, BLOCK_SIZE_N/8]
 
         # --- 3. 实时反量化 B ---
         # 解包 B

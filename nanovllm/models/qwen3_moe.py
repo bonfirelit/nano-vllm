@@ -310,6 +310,7 @@ class Qwen3MoeModel(nn.Module):
     def __init__(
         self,
         config: Qwen3MoeConfig,
+        quant_config=None,
     ) -> None:
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
@@ -343,9 +344,10 @@ class Qwen3MoeForCausalLM(nn.Module):
     def __init__(
         self,
         config: Qwen3MoeConfig,
+        quant_config=None,
     ) -> None:
         super().__init__()
-        self.model = Qwen3MoeModel(config)
+        self.model = Qwen3MoeModel(config, quant_config=quant_config)
         self.num_experts = config.num_experts
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         if config.tie_word_embeddings:
