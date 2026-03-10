@@ -103,16 +103,18 @@ class ColumnParallelLinear(LinearBase):
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         tp_rank = self.tp_rank
-        
+
         # 核心逻辑：获取当前参数在哪个维度需要被切分
-        # 如果是 qweight 或 qzeros，维度 1 对应 output_size
-        # 如果是 scales 或 bias 或普通的 weight，维度 0/1 对应关系不同
-        
+        # 如果是 qweight、qzeros 或 scales，output 维度在 dim 1
+        # 如果是 bias 或普通 weight，切分 dim 0
+
         # 1. 确定切分维度
-        # 对于 AWQ，qweight 是 [in, out/8]，qzeros 是 [in/g, out/8]
+        # 对于 AWQ，qweight 是 [in, out/8]，qzeros 是 [in/g, out/8]，scales 是 [in/g, out]
         # 它们的 output 维度都在 dim 1
         if hasattr(self, "qweight") and param is self.qweight:
-            curr_tp_dim = 1 
+            curr_tp_dim = 1
+        elif hasattr(self, "qzeros") and param is self.qzeros:
+            curr_tp_dim = 1
         elif hasattr(self, "scales") and param is self.scales:
             curr_tp_dim = 1
         elif hasattr(self, "bias") and param is self.bias:
