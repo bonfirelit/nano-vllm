@@ -3,6 +3,7 @@ from dataclasses import fields
 from time import perf_counter
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
+import torch
 import torch.multiprocessing as mp
 
 from nanovllm.config import Config
@@ -61,6 +62,16 @@ class LLMEngine:
     def is_finished(self):
         return self.scheduler.is_finished()
 
+    def _report_memory(self):
+        """Report GPU memory usage after inference."""
+        if not torch.cuda.is_available():
+            return
+        allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+        reserved = torch.cuda.memory_reserved() / 1024**3    # GB
+        stats = torch.cuda.memory_stats()
+        peak = stats["allocated_bytes.all.peak"] / 1024**3   # GB
+        print(f"[Memory] Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB, Peak: {peak:.2f}GB")
+
     def generate(
         self,
         prompts: list[str] | list[list[int]],
@@ -91,6 +102,7 @@ class LLMEngine:
                 outputs[seq_id] = token_ids
                 if use_tqdm:
                     pbar.update(1)
+        self._report_memory()
         outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
         outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
         if use_tqdm:
