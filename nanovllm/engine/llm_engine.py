@@ -54,10 +54,11 @@ class LLMEngine:
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         # postprocess负责检查请求是否结束
         # 如果适配chunked prefill，这里可以要求上一步返回的对应req的token_ids是空
-        self.scheduler.postprocess(seqs, token_ids)
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        finished_seqs = [seq for seq in seqs if seq.is_finished]
+        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in finished_seqs]
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
-        return outputs, num_tokens
+        return outputs, num_tokens, finished_seqs
 
     def is_finished(self):
         return self.scheduler.is_finished()
@@ -72,6 +73,28 @@ class LLMEngine:
         peak = stats["allocated_bytes.all.peak"] / 1024**3   # GB
         print(f"[Memory] Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB, Peak: {peak:.2f}GB")
 
+    def _report_latency(self, completed_seqs: list):
+        """Report TTFT and TBT latency metrics."""
+        if not completed_seqs:
+            return
+        ttft_list = []
+        tbt_list = []
+        for seq in completed_seqs:
+            if seq.first_token_time is not None:
+                ttft = (seq.first_token_time - seq.start_time) * 1000  # ms
+                ttft_list.append(ttft)
+                # TBT: time between tokens (exclude first token)
+                if len(seq.token_times) > 1:
+                    total_decode_time = seq.token_times[-1] - seq.token_times[0]
+                    tbt = (total_decode_time / (len(seq.token_times) - 1)) * 1000  # ms
+                    tbt_list.append(tbt)
+        if ttft_list:
+            avg_ttft = sum(ttft_list) / len(ttft_list)
+            print(f"[Latency] TTFT: {avg_ttft:.2f}ms (avg of {len(ttft_list)} requests)")
+        if tbt_list:
+            avg_tbt = sum(tbt_list) / len(tbt_list)
+            print(f"[Latency] TBT: {avg_tbt:.2f}ms (avg of {len(tbt_list)} requests)")
+
     def generate(
         self,
         prompts: list[str] | list[list[int]],
@@ -85,10 +108,12 @@ class LLMEngine:
         for prompt, sp in zip(prompts, sampling_params):
             self.add_request(prompt, sp)
         outputs = {}
+        completed_seqs = []  # Track completed sequences for latency metrics
         prefill_throughput = decode_throughput = 0.
         while not self.is_finished():
             t = perf_counter()
-            output, num_tokens = self.step()
+            output, num_tokens, finished_seqs = self.step()
+            completed_seqs.extend(finished_seqs)
             if use_tqdm:
                 if num_tokens > 0:
                     prefill_throughput = num_tokens / (perf_counter() - t)
@@ -103,6 +128,7 @@ class LLMEngine:
                 if use_tqdm:
                     pbar.update(1)
         self._report_memory()
+        self._report_latency(completed_seqs)
         outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
         outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
         if use_tqdm:
