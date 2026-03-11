@@ -50,6 +50,7 @@ class ModelRunner:
         print("[LOG] Loading model weights...")
         load_model(self.model, config.model)
         print("[LOG] Model weights loaded.")
+        self._report_model_memory()
         self.sampler = Sampler()
         self.warmup_model()
         self.allocate_kv_cache()
@@ -108,6 +109,31 @@ class ModelRunner:
             self.write_shm(method_name, *args)
         method = getattr(self, method_name, None)
         return method(*args)
+
+    def _report_model_memory(self):
+        """Calculate and report model weights memory usage."""
+        if not torch.cuda.is_available():
+            return
+
+        total_params = 0
+        total_bytes = 0
+        param_dtype = None
+
+        for name, param in self.model.named_parameters():
+            num_params = param.numel()
+            total_params += num_params
+            total_bytes += num_params * param.element_size()
+            if param_dtype is None:
+                param_dtype = param.dtype
+
+        total_gb = total_bytes / 1024**3
+        # For tensor parallelism, each rank holds 1/world_size of the model
+        if self.world_size > 1:
+            per_rank_gb = total_gb / self.world_size
+            print(f"[Memory] Model weights: {total_gb:.2f}GB (dtype: {param_dtype}), "
+                  f"per rank: {per_rank_gb:.2f}GB x {self.world_size} ranks")
+        else:
+            print(f"[Memory] Model weights: {total_gb:.2f}GB (dtype: {param_dtype})")
 
     def warmup_model(self):
         torch.cuda.empty_cache()
